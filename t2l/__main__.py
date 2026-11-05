@@ -42,6 +42,10 @@ def _overlap_start(watermark):
 
 
 def run(client, home_dir, state, notify=notify, tz=None):
+    # An outstanding upload must not change the files the user is about to import;
+    # anything new waits for mark-uploaded and is picked up from the watermark.
+    if state["pending"]:
+        return 0
     client.ensure_token()
     acts = client.last_activities()["movies"]["watched_at"]
     if acts == state["watched_at"]:
@@ -104,14 +108,23 @@ def main(argv):
             code = mark_uploaded(home_dir, state)
         else:
             client = _client(home_dir)
-            code = run(client, home_dir, state)
-            if client.creds_changed:
-                save_creds(home_dir / "creds.json", client.creds)
+            try:
+                code = run(client, home_dir, state)
+            finally:
+                # Trakt refresh tokens are single use: persist a rotation even when a later call fails.
+                if client.creds_changed:
+                    save_creds(home_dir / "creds.json", client.creds)
         save_state(state_path, state)
         return code
     except AuthError as e:
         print(str(e), file=sys.stderr)
+        notify(str(e))
         return 2
+    except Exception as e:  # launchd shows nothing; the notification is the only signal the user gets
+        message = f"{type(e).__name__}: {e}"
+        print(message, file=sys.stderr)
+        notify(message)
+        return 1
 
 
 if __name__ == "__main__":

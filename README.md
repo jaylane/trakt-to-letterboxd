@@ -43,9 +43,14 @@ python3 -m t2l run
    python3 -m t2l mark-uploaded
    ```
 
+While a CSV is pending, scheduled runs leave it untouched and new plays wait
+for `mark-uploaded`; they are picked up on the next run.
+
 ## Schedule it
 
-launchd runs a missed calendar job on wake; cron does not.
+launchd runs a missed calendar job on wake; cron does not. Keep the repo
+outside `~/Documents`, `~/Desktop` and `~/Downloads`: macOS blocks background
+agents from those folders unless you grant the Python binary Full Disk Access.
 
 ```bash
 sed -e "s|__PYTHON__|$(command -v python3)|" -e "s|__REPO__|$PWD|" -e "s|__HOME__|$HOME|" \
@@ -53,7 +58,14 @@ sed -e "s|__PYTHON__|$(command -v python3)|" -e "s|__REPO__|$PWD|" -e "s|__HOME_
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jaylane.trakt-to-letterboxd.plist
 ```
 
-Logs: `~/Library/Logs/trakt-to-letterboxd.log`. Uninstall:
+Check the first scheduled run with:
+
+```bash
+launchctl print gui/$(id -u)/com.jaylane.trakt-to-letterboxd | grep "last exit"
+```
+
+Logs: `~/Library/Logs/trakt-to-letterboxd.log`. Errors also raise a
+notification. Uninstall:
 
 ```bash
 launchctl bootout gui/$(id -u)/com.jaylane.trakt-to-letterboxd

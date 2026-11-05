@@ -17,9 +17,12 @@ def item(hid, watched_at, trakt=1):
 
 
 class FakeClient:
-    def __init__(self, watched_at="2026-11-05T10:00:00.000Z", history=(), ratings=None, auth_error=None):
+    def __init__(self, watched_at="2026-11-05T10:00:00.000Z", history=(), ratings=None, auth_error=None,
+                 history_error=None, creds_changed=False):
         self.watched_at, self.history, self.ratings = watched_at, list(history), ratings or {}
-        self.auth_error, self.calls, self.creds_changed = auth_error, [], False
+        self.auth_error, self.history_error = auth_error, history_error
+        self.calls, self.creds_changed = [], creds_changed
+        self.creds = {"client_id": "c", "client_secret": "s", "access_token": "new", "refresh_token": "newr", "expires_at": 9}
 
     def ensure_token(self):
         if self.auth_error:
@@ -31,6 +34,8 @@ class FakeClient:
 
     def history_movies(self, start_at):
         self.calls.append(("history", start_at))
+        if self.history_error:
+            raise self.history_error
         return self.history
 
     def ratings_movies(self):
@@ -70,13 +75,23 @@ class RunTest(unittest.TestCase):
     def test_incremental_run_overlaps_one_day_and_skips_exported(self):
         c = FakeClient(history=[item(2, "2026-11-04T20:00:00Z"), item(3, "2026-11-05T09:00:00Z")])
         state = {"watched_at": "old", "watermark": "2026-11-04T20:00:00Z", "exported_ids": [1, 2],
-                 "played": [1], "pending": [{"tmdbID": "603", "imdbID": "tt0133093", "Title": "The Matrix",
-                                             "Year": "1999", "WatchedDate": "2026-11-04", "Rewatch": "true", "Rating10": ""}]}
+                 "played": [1], "pending": []}
         self.run_once(c, state)
         self.assertEqual(c.calls[1], ("history", "2026-11-03T20:00:00Z"))
-        self.assertEqual(len(state["pending"]), 2)
+        self.assertEqual(len(state["pending"]), 1)
         self.assertEqual(sorted(state["exported_ids"]), [1, 2, 3])
         self.assertIn("1 new plays", self.notes[0])
+
+    def test_outstanding_upload_defers_new_plays(self):
+        c = FakeClient(history=[item(3, "2026-11-05T09:00:00Z")])
+        pending = [{"tmdbID": "603", "imdbID": "tt0133093", "Title": "The Matrix", "Year": "1999",
+                    "WatchedDate": "2026-11-04", "Rewatch": "", "Rating10": ""}]
+        state = {"watched_at": "old", "watermark": "2026-11-04T20:00:00Z", "exported_ids": [2],
+                 "played": [1], "pending": list(pending)}
+        code, state = self.run_once(c, state)
+        self.assertEqual((code, c.calls, self.notes), (0, [], []))
+        self.assertEqual(state["pending"], pending)
+        self.assertEqual(state["watched_at"], "old")
 
     def test_new_activity_with_no_new_movies_is_quiet(self):
         c = FakeClient(history=[item(1, "2026-11-01T20:00:00Z")])
@@ -118,6 +133,24 @@ class MainTest(unittest.TestCase):
             with mock.patch("sys.stderr"):
                 self.assertEqual(main(["run"]), 2)
         self.assertFalse((self.home / "state.json").exists())
+
+    def test_auth_error_is_notified(self):
+        (self.home / "creds.json").write_text(json.dumps({"client_id": "c", "client_secret": "s"}))
+        with mock.patch("t2l.__main__.TraktClient", return_value=FakeClient(auth_error="refresh failed (400): run auth again")):
+            with mock.patch("t2l.__main__.notify") as note, mock.patch("sys.stderr"):
+                self.assertEqual(main(["run"]), 2)
+        self.assertIn("refresh failed", note.call_args[0][0])
+
+    def test_refreshed_token_is_saved_when_a_later_call_fails(self):
+        (self.home / "creds.json").write_text(json.dumps({"client_id": "c", "client_secret": "s", "refresh_token": "old"}))
+        fake = FakeClient(history_error=RuntimeError("GET /sync/history/movies failed (502)"), creds_changed=True)
+        with mock.patch("t2l.__main__.TraktClient", return_value=fake):
+            with mock.patch("t2l.__main__.notify") as note, mock.patch("sys.stderr") as err:
+                self.assertEqual(main(["run"]), 1)
+        self.assertEqual(json.loads((self.home / "creds.json").read_text())["refresh_token"], "newr")
+        self.assertFalse((self.home / "state.json").exists())
+        self.assertIn("502", note.call_args[0][0])
+        self.assertIn("502", "".join(str(c) for c in err.write.call_args_list))
 
     def test_state_round_trip(self):
         path = self.home / "state.json"
